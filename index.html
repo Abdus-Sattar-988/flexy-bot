@@ -5,40 +5,49 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>متجري - مرحبا بك</title>
     
-    <!-- Meta Tag التحقق من Heleket (مهم جداً) -->
+    <!-- Meta Tag التحقق من Heleket (النسخة المعدلة حسب طلبك) -->
     <meta name="heleket" content="4fc5c28f" />
     
-    <meta name="description" content="متجر إلكتروني آمن يقبل الدفع بالعملات المشفرة">
-    <meta name="keywords" content="متجر, عملات مشفرة, heleket, دفع كريبتو">
+    <meta name="description" content="متجر إلكتروني آمن - دفع بالعملات المشفرة عبر Heleket">
     
     <style>
         body {
             font-family: Arial, sans-serif;
             margin: 0;
             padding: 0;
-            background-color: #f4f4f4;
+            background-color: #f8f9fa;
             color: #333;
             text-align: center;
-            padding: 50px 20px;
+            padding: 60px 20px;
         }
         .container {
-            max-width: 800px;
+            max-width: 700px;
             margin: 0 auto;
             background: white;
-            padding: 40px;
-            border-radius: 10px;
-            box-shadow: 0 0 15px rgba(0,0,0,0.1);
+            padding: 50px 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
         }
         h1 {
             color: #27ae60;
+            margin-bottom: 20px;
+        }
+        p {
+            font-size: 18px;
+            line-height: 1.6;
+        }
+        .success {
+            color: #27ae60;
+            font-weight: bold;
+            margin: 25px 0;
         }
         button {
             background-color: #27ae60;
             color: white;
             border: none;
-            padding: 15px 30px;
+            padding: 16px 35px;
             font-size: 18px;
-            border-radius: 5px;
+            border-radius: 6px;
             cursor: pointer;
             margin-top: 20px;
         }
@@ -49,14 +58,15 @@
 </head>
 <body>
     <div class="container">
-        <h1>مرحبا بك في متجري</h1>
-        <p>هذه الصفحة الرئيسية جاهزة للنشر على Railway.</p>
+        <h1>مرحباً بك في متجري</h1>
         <p>تم إضافة Meta Tag التحقق من Heleket بنجاح.</p>
+        <p class="success">الآن يمكنك العودة إلى Heleket والضغط على Verify</p>
         
-        <button onclick="alert('سيتم توجيهك إلى صفحة الدفع قريباً')">ابدأ التسوق الآن</button>
+        <button onclick="window.location.href='#'">ابدأ التسوق</button>
         
-        <p style="margin-top: 50px; font-size: 14px; color: #777;">
-            بعد النشر، افتح الموقع واضغط F12 → تبويب Elements، وابحث عن "heleket" للتأكد من وجود الـ Meta Tag.
+        <p style="margin-top: 60px; font-size: 14px; color: #666;">
+            للتأكد: اضغط F12 → تبويب Elements وابحث عن "heleket"<br>
+            يجب أن ترى: <strong>&lt;meta name="heleket" content="4fc5c28f"&gt;</strong>
         </p>
     </div>
 </body>
