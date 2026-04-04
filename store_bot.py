@@ -6,7 +6,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 TOKEN                = "8799605089:AAEitRruRKPCCg-ZRuL-r_IpRlnqkNm-6bw"
-OWNER_ID             =  "7286057617"
+OWNER_ID             = int(os.getenv("OWNER_ID", "7286057617"))
 DATABASE_URL         = "postgresql://flexybot_user:25dGFamQqxa00PZgpwKhUsQMb6chhgLr@dpg-d73sgfkr85hc73fh7log-a/flexybot"
 EXCHANGE_RATE        = float(os.getenv("EXCHANGE_RATE", "1"))
 WITHDRAW_FEE         = float(os.getenv("WITHDRAW_FEE", "0.0"))
@@ -18,6 +18,7 @@ SUPPORT_USER         = os.getenv("SUPPORT_USER", "support")
 DEFAULT_CHARGE_PHONE = os.getenv("CHARGE_PHONE", "0555 123 456")
 TARGET_SENDER        = os.getenv("TARGET_SENDER", "Mobilis")
 SMS_TIME_WINDOW_MIN  = int(os.getenv("SMS_TIME_WINDOW", "60"))
+SMS_TIME_OFFSET_MIN  = int(os.getenv("SMS_TIME_OFFSET", "60"))  # فرق ساعة محول الرسائل
 
 logging.basicConfig(
     level=logging.INFO,
@@ -273,7 +274,7 @@ def is_admin(uid):
 
 
 def is_owner(uid):
-    return int(uid) == OWNER_ID
+    return int(uid) == int(OWNER_ID)
 
 
 def is_activated(uid):
@@ -384,13 +385,18 @@ def time_in_window(sms_time_str, window_minutes=None):
 
 
 def get_candidate_times(user_time):
-    """يولّد قائمة أوقات للبحث: الوقت المدخل ± دقيقة واحدة."""
+    """يولّد قائمة أوقات للبحث: الوقت المدخل + دقيقة واحدة فقط، مع تعويض فرق ساعة محول الرسائل."""
     try:
         h, m = map(int, user_time.split(":"))
         base = datetime.datetime(2000, 1, 1, h, m)
         times = set()
-        for delta in [-1, 0, 1]:
+        # +0 و +1 دقيقة للوقت المدخل
+        for delta in [0, 1]:
             t = base + datetime.timedelta(minutes=delta)
+            times.add(f"{t.hour:02d}:{t.minute:02d}")
+        # نفس الأوقات مع تعويض فرق الساعة (محول الرسائل ينقص ساعة)
+        for delta in [0, 1]:
+            t = base + datetime.timedelta(minutes=delta + SMS_TIME_OFFSET_MIN)
             times.add(f"{t.hour:02d}:{t.minute:02d}")
         return list(times)
     except Exception:
@@ -400,15 +406,15 @@ def get_candidate_times(user_time):
 def find_sms_match(cur, amount, candidate_times):
     """
     البحث الذكي في sms_vault:
-    1. رسالة واحدة بالمبلغ الكامل ضمن ±1 دقيقة
-    2. رسالتان فقط مجموعهما = المبلغ في نفس الوقت المدخل بالضبط
+    1. رسالة واحدة بالمبلغ الكامل ضمن الأوقات المرشحة
+    2. رسالتان مجموعهما = المبلغ ضمن نفس الأوقات المرشحة
     يرجع: (نوع, قائمة IDs, الوقت المطابق) أو (None, [], "")
     """
     from itertools import combinations
 
     placeholders = ", ".join(["%s"] * len(candidate_times))
 
-    # المرحلة 1: رسالة واحدة بالمبلغ الكامل ضمن ±1 دقيقة
+    # المرحلة 1: رسالة واحدة بالمبلغ الكامل
     cur.execute(f"""
         SELECT id, sms_time FROM sms_vault
         WHERE amount = %s
@@ -423,7 +429,7 @@ def find_sms_match(cur, amount, candidate_times):
     if row:
         return ("single", [row["id"]], row["sms_time"])
 
-    # المرحلة 2: رسالتان مجموعهما = المبلغ ضمن ±1 دقيقة
+    # المرحلة 2: رسالتان مجموعهما = المبلغ
     cur.execute(f"""
         SELECT id, amount, sms_time FROM sms_vault
         WHERE sms_time IN ({placeholders})
@@ -1692,7 +1698,10 @@ def sms_webhook():
                 if year < 100:
                     year += 2000
                 sms_date = f"{int(day):02d}/{int(month):02d}/{year}"
-                sms_time = f"{int(hour):02d}:{int(minute):02d}"
+                # تعويض فرق الساعة: محول الرسائل ينقص ساعة فنزيدها
+                raw_dt = datetime.datetime(year, int(month), int(day), int(hour), int(minute))
+                corrected_dt = raw_dt + datetime.timedelta(minutes=SMS_TIME_OFFSET_MIN)
+                sms_time = f"{corrected_dt.hour:02d}:{corrected_dt.minute:02d}"
             else:
                 time_only = re.sub(r"[^\d.:]", "", raw_datetime.split("-")[-1]).strip().replace(".", ":")
                 sms_time = time_only if validate_time(time_only) else datetime.datetime.now().strftime("%H:%M")
