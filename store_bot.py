@@ -385,15 +385,13 @@ def time_in_window(sms_time_str, window_minutes=None):
 
 
 def get_candidate_times(user_time):
-    """يولّد قائمة أوقات للبحث: الوقت المدخل ناقص فرق الساعة + دقيقة واحدة."""
+    """يولّد قائمة أوقات للبحث: الوقت المدخل و +1 دقيقة فقط."""
     try:
         h, m = map(int, user_time.split(":"))
         base = datetime.datetime(2000, 1, 1, h, m)
-        # نطرح فرق الساعة لأن sms forwarder ينقص ساعة عند الإرسال
-        adjusted = base - datetime.timedelta(minutes=SMS_TIME_OFFSET_MIN)
         times = set()
         for delta in [0, 1]:
-            t = adjusted + datetime.timedelta(minutes=delta)
+            t = base + datetime.timedelta(minutes=delta)
             times.add(f"{t.hour:02d}:{t.minute:02d}")
         return list(times)
     except Exception:
