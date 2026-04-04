@@ -432,10 +432,34 @@ def t(lang, k, **kw):
 # ============================================================
 # DATABASE  (PostgreSQL via psycopg2)
 # ============================================================
+class _PgConn:
+    """Wrapper يضمن close() حتى عند الاستثناء — يحل مشكلة تسرب connections مع Neon"""
+    def __init__(self):
+        self._c = psycopg2.connect(DATABASE_URL)
+    def cursor(self, **kw):
+        return self._c.cursor(**kw)
+    def commit(self):
+        return self._c.commit()
+    def rollback(self):
+        return self._c.rollback()
+    def close(self):
+        try: self._c.close()
+        except Exception: pass
+    def __enter__(self):
+        return self
+    def __exit__(self, exc_type, *_):
+        if exc_type:
+            try: self._c.rollback()
+            except Exception: pass
+        else:
+            try: self._c.commit()
+            except Exception: pass
+        self.close()
+        return False
+
 def get_conn():
-    """اتصال عادي بـ PostgreSQL — cursor يرجع tuples"""
-    conn = psycopg2.connect(DATABASE_URL)
-    return conn
+    """اتصال آمن بـ PostgreSQL — يضمن إغلاق الـ connection دائماً"""
+    return _PgConn()
 
 def _row(r):
     """للتوافق — يرجع الصف كما هو (tuple)"""
@@ -445,7 +469,8 @@ def _rows(rs):
     return list(rs)
 
 def init_db():
-    conn = psycopg2.connect(DATABASE_URL)   # cursor عادي هنا — لا RealDict
+    # BUG7 FIX: استخدام get_conn() الآمنة بدلاً من psycopg2.connect() المباشر
+    conn = get_conn()
     cur  = conn.cursor()
     cur.execute("""
     CREATE TABLE IF NOT EXISTS users (
@@ -707,12 +732,27 @@ def stock_add_units(pid, units):
     c.commit(); c.close(); return count
 
 def stock_pop_unit(pid, order_id=None):
+    # BUG3 FIX: CTE مع FOR UPDATE SKIP LOCKED لتفادي race condition
+    # مستخدمان لا يحصلان على نفس الوحدة أبداً حتى عند الشراء المتزامن
     c = get_conn(); cur = c.cursor()
-    cur.execute("SELECT id,unit_value FROM product_stock WHERE product_id=%s AND is_used=0 ORDER BY id ASC LIMIT 1", (pid,))
+    cur.execute("""
+        WITH next_unit AS (
+            SELECT id FROM product_stock
+            WHERE product_id = %s AND is_used = 0
+            ORDER BY id ASC
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE product_stock
+        SET is_used = 1, used_at = CURRENT_TIMESTAMP, order_id = %s
+        FROM next_unit
+        WHERE product_stock.id = next_unit.id
+        RETURNING product_stock.unit_value
+    """, (pid, order_id))
     row = cur.fetchone()
-    if not row: c.close(); return None
-    unit_id, value = row[0], row[1]
-    cur.execute("UPDATE product_stock SET is_used=1, used_at=CURRENT_TIMESTAMP, order_id=%s WHERE id=%s", (order_id, unit_id))
+    if not row:
+        c.close(); return None
+    value = row[0]
     cur.execute("SELECT COUNT(*) FROM product_stock WHERE product_id=%s AND is_used=0", (pid,))
     remaining = cur.fetchone()[0]
     cur.execute("UPDATE products SET stock=%s WHERE id=%s", (remaining, pid))
@@ -1389,13 +1429,20 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try: await q.answer()
         except Exception: pass
         oid = int(d.split(":")[1])
+        # BUG5 FIX: atomic approve — يمنع التسليم المزدوج عند ضغط approve مرتين
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("""
+            UPDATE orders SET status='completed'
+            WHERE id=%s AND status != 'completed'
+            RETURNING id
+        """, (oid,))
+        updated = cur.fetchone()
+        conn.commit(); conn.close()
+        if not updated:
+            await q.answer("✅ الطلب مكتمل بالفعل أو غير موجود", show_alert=True); return
         order = get_order(oid)
         if not order:
             await q.answer("❌ الطلب غير موجود", show_alert=True); return
-        if order[6] == "completed":
-            await q.answer("✅ الطلب مكتمل بالفعل", show_alert=True); return
-        # 1) تحديث حالة الطلب
-        set_order_status(oid, "completed")
         # 2) إزالة الأزرار من رسالة الأدمن فوراً
         try:
             await q.edit_message_reply_markup(reply_markup=None)
@@ -1723,15 +1770,23 @@ async def _cb_payment(update, ctx, lang, method):
             await send_or_edit(update, "❌ تعذر إنشاء رابط الدفع، تواصل مع الدعم.", kb)
 
     elif method == "wallet":
-        bal = get_balance(uid)
-        if bal < final:
+        # BUG4 FIX: atomic deduction — يمنع double-spend إذا ضغط المستخدم مرتين
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("""
+            UPDATE users SET balance = balance - %s
+            WHERE id = %s AND balance >= %s
+            RETURNING balance
+        """, (final, uid, final))
+        row = cur.fetchone()
+        conn.commit(); conn.close()
+        if not row:
+            bal = get_balance(uid)
             kb = [
                 [InlineKeyboardButton(f"💳 {t(lang,'deposit')}", callback_data="do_deposit")],
                 [InlineKeyboardButton(f"🏠 {t(lang,'back_main')}", callback_data="go_main")],
             ]
             await send_or_edit(update, t(lang,"no_balance", b=f"{bal:.2f}"), kb); return
         oid = create_order(uid, items, final, disc_total, "wallet")
-        change_balance(uid, -final)
         set_order_status(oid, "completed")
         clear_cart(uid); clear_state(uid)
         await _notify_admins(ctx, uid, update.effective_user.first_name, cart, final, "Wallet")
@@ -1877,7 +1932,10 @@ async def _create_heleket_deposit(amount_usd, user_id):
         return None
 
 async def _notify_admins(ctx, uid, name, cart, total, method):
-    items_txt = ", ".join([f"{i[2]}×{i[1]}" for i in cart])
+    # BUG6 FIX: يدعم كلا الشكلين — tuple من get_cart() أو dict من items JSON
+    def _item_name(i): return i["name"] if isinstance(i, dict) else i[2]
+    def _item_qty(i):  return i["qty"]  if isinstance(i, dict) else i[1]
+    items_txt = ", ".join([f"{_item_name(i)}×{_item_qty(i)}" for i in cart])
     for adm in ADMIN_IDS:
         try:
             await ctx.bot.send_message(adm, t("ar","new_order_adm",
@@ -2009,9 +2067,11 @@ async def _cb_admin(update, ctx, lang, action):
         await send_or_edit(update, t(lang,"disc_panel"), kb)
 
     elif action == "orders":
-        c2 = get_conn(); cur2 = c2.cursor()
-        cur2.execute("SELECT id,user_id,total,status,method,created FROM orders ORDER BY created DESC LIMIT 20")
-        orders = cur2.fetchall(); c2.close()
+        # BUG8 FIX: استخدام context manager لضمان إغلاق الـ connection
+        with get_conn() as c2:
+            cur2 = c2.cursor()
+            cur2.execute("SELECT id,user_id,total,status,method,created FROM orders ORDER BY created DESC LIMIT 20")
+            orders = cur2.fetchall()
         if not orders:
             kb = [[InlineKeyboardButton(f"◀️ {t(lang,'back_admin')}", callback_data="go_admin")]]
             await send_or_edit(update, "📋 لا توجد طلبات بعد", kb); return
