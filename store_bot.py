@@ -9,7 +9,6 @@ import logging
 import json
 import os
 import psycopg2
-import psycopg2.extras
 import requests
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -25,10 +24,10 @@ from telegram.ext import (
 # ============================================================
 BOT_TOKEN        = os.getenv("BOT_TOKEN", "8555308886:AAGq9Ff0sukh2wsgFV_byykwOCfAe1ClOPk")
 ADMIN_IDS        = [7286057617]
-STORE_NAME       = "🌐 issam Proxy store "
+STORE_NAME       = "🌐 Issam Proxy Shop"
 CURRENCY         = "USDT"
 SUPPORT_USERNAME = "@m_issam_31"
-DATABASE_URL     = os.getenv("DATABASE_URL", "")   # ← ضع رابط قاعدة البيانات هنا أو في env
+DATABASE_URL     = os.getenv("DATABASE_URL", "postgresql://neondb_owner:npg_amOWrtJF79pX@ep-shy-sunset-a4in8i3m-pooler.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require")   # ← ضع رابط قاعدة البيانات هنا أو في env
 STOCK_LOW_ALERT  = 5
 HELEKET_MERCHANT_ID  = os.getenv("HELEKET_MERCHANT_ID", "YOUR_MERCHANT_UUID")
 HELEKET_API_KEY      = os.getenv("HELEKET_API_KEY",     "YOUR_PAYMENT_API_KEY")
@@ -434,18 +433,20 @@ def t(lang, k, **kw):
 # DATABASE  (PostgreSQL via psycopg2)
 # ============================================================
 def get_conn():
-    conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    """اتصال عادي بـ PostgreSQL — cursor يرجع tuples"""
+    conn = psycopg2.connect(DATABASE_URL)
     return conn
 
 def _row(r):
-    """تحويل RealDictRow إلى tuple للتوافق مع بقية الكود"""
-    return tuple(r.values()) if r else None
+    """للتوافق — يرجع الصف كما هو (tuple)"""
+    return r
 
 def _rows(rs):
-    return [tuple(r.values()) for r in rs]
+    return list(rs)
 
 def init_db():
-    conn = get_conn(); cur = conn.cursor()
+    conn = psycopg2.connect(DATABASE_URL)   # cursor عادي هنا — لا RealDict
+    cur  = conn.cursor()
     cur.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id BIGINT PRIMARY KEY, username TEXT, name TEXT,
@@ -528,7 +529,7 @@ def get_lang(uid):
     c = get_conn(); cur = c.cursor()
     cur.execute("SELECT lang FROM users WHERE id=%s", (uid,))
     r = cur.fetchone(); c.close()
-    return r["lang"] if r else "ar"
+    return r[0] if r else "ar"
 
 def set_lang(uid, lang):
     c = get_conn(); cur = c.cursor()
@@ -540,8 +541,8 @@ def get_state(uid):
     cur.execute("SELECT state, state_data FROM users WHERE id=%s", (uid,))
     r = cur.fetchone(); c.close()
     if r:
-        try: return r["state"], json.loads(r["state_data"] or "{}")
-        except: return r["state"], {}
+        try: return r[0], json.loads(r[1] or "{}")
+        except: return r[0], {}
     return "main", {}
 
 def set_state(uid, state, data=None):
@@ -662,7 +663,7 @@ def clear_cart(uid):
 def get_balance(uid):
     c = get_conn(); cur = c.cursor()
     cur.execute("SELECT balance FROM users WHERE id=%s", (uid,))
-    r = cur.fetchone(); c.close(); return r["balance"] if r else 0.0
+    r = cur.fetchone(); c.close(); return r[0] if r else 0.0
 
 def change_balance(uid, amt):
     c = get_conn(); cur = c.cursor()
