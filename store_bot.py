@@ -7,8 +7,7 @@ from psycopg2.extras import RealDictCursor
 
 TOKEN                = "8799605089:AAEitRruRKPCCg-ZRuL-r_IpRlnqkNm-6bw"
 OWNER_ID             =  "7286057617"
-DATABASE_URL         = "postgresql://postgres:[jQe!/GT43C_&xf-]@db.sdffapzecdpzkszrzmiv.supabase.co:5432/postgres"
-TARGET_SENDER        = os.getenv("TARGET_SENDER", "Mobilis") 
+DATABASE_URL         = "postgresql://flexybot_user:25dGFamQqxa00PZgpwKhUsQMb6chhgLr@dpg-d73sgfkr85hc73fh7log-a/flexybot"
 EXCHANGE_RATE        = float(os.getenv("EXCHANGE_RATE", "1"))
 WITHDRAW_FEE         = float(os.getenv("WITHDRAW_FEE", "0.0"))
 MAX_ATTEMPTS         = int(os.getenv("MAX_ATTEMPTS", "5"))
