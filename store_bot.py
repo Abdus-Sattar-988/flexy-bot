@@ -16,7 +16,7 @@ MIN_WITHDRAW         = int(os.getenv("MIN_WITHDRAW", "500"))
 FLASK_PORT           = int(os.getenv("PORT", "5000"))
 SUPPORT_USER         = os.getenv("SUPPORT_USER", "support")
 DEFAULT_CHARGE_PHONE = os.getenv("CHARGE_PHONE", "0555 123 456"
-       TARGET_SENDER = os.getenv("TARGET_SENDER", "Mobilis")
+TARGET_SENDER        = os.getenv("TARGET_SENDER", "Mobilis")) 
 SMS_TIME_WINDOW_MIN  = int(os.getenv("SMS_TIME_WINDOW", "60"))
 
 logging.basicConfig(
