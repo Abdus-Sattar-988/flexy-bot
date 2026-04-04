@@ -23,9 +23,9 @@ from telegram.ext import (
 # ============================================================
 # ⚙️  CONFIGURATION
 # ============================================================
-BOT_TOKEN        = os.getenv("BOT_TOKEN", "8678179663:AAF0XHqXkf8_ZjI4_0ypY6WfnJKogr7Xk4s")
+BOT_TOKEN        = os.getenv("BOT_TOKEN", "8555308886:AAGq9Ff0sukh2wsgFV_byykwOCfAe1ClOPk")
 ADMIN_IDS        = [7286057617]
-STORE_NAME       = "🌐 Proxy Store"
+STORE_NAME       = "🌐 issam Proxy store "
 CURRENCY         = "USDT"
 SUPPORT_USERNAME = "@m_issam_31"
 DATABASE_URL     = os.getenv("DATABASE_URL", "")   # ← ضع رابط قاعدة البيانات هنا أو في env
