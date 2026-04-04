@@ -432,392 +432,438 @@ def t(lang, k, **kw):
 # ============================================================
 # DATABASE  (PostgreSQL via psycopg2)
 # ============================================================
-class _PgConn:
-    """Wrapper يضمن close() حتى عند الاستثناء — يحل مشكلة تسرب connections مع Neon"""
+# ============================================================
+# DATABASE  (PostgreSQL via psycopg2 — ThreadedConnectionPool)
+# ============================================================
+from psycopg2 import pool as _pg_pool
+import contextlib
+
+_pool = None
+
+def _get_pool():
+    global _pool
+    if _pool is None:
+        _pool = _pg_pool.ThreadedConnectionPool(
+            minconn=1, maxconn=10, dsn=DATABASE_URL
+        )
+    return _pool
+
+@contextlib.contextmanager
+def get_db():
+    """Context manager آمن — يعيد الـ connection للـ pool بعد الاستخدام دائماً"""
+    p = _get_pool()
+    conn = p.getconn()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        p.putconn(conn)
+
+# ── Compatibility shim: الكود القديم يستدعي get_conn() ──
+class _ConnShim:
+    """يحاكي الـ API القديم (get_conn/cursor/commit/close) فوق الـ pool"""
     def __init__(self):
-        self._c = psycopg2.connect(DATABASE_URL)
+        self._pool = _get_pool()
+        self._conn = self._pool.getconn()
     def cursor(self, **kw):
-        return self._c.cursor(**kw)
+        return self._conn.cursor(**kw)
     def commit(self):
-        return self._c.commit()
+        self._conn.commit()
     def rollback(self):
-        return self._c.rollback()
+        self._conn.rollback()
     def close(self):
-        try: self._c.close()
+        try: self._pool.putconn(self._conn)
         except Exception: pass
     def __enter__(self):
         return self
     def __exit__(self, exc_type, *_):
         if exc_type:
-            try: self._c.rollback()
+            try: self._conn.rollback()
             except Exception: pass
         else:
-            try: self._c.commit()
+            try: self._conn.commit()
             except Exception: pass
         self.close()
         return False
 
 def get_conn():
-    """اتصال آمن بـ PostgreSQL — يضمن إغلاق الـ connection دائماً"""
-    return _PgConn()
+    return _ConnShim()
 
 def _row(r):
-    """للتوافق — يرجع الصف كما هو (tuple)"""
     return r
 
 def _rows(rs):
     return list(rs)
 
 def init_db():
-    # BUG7 FIX: استخدام get_conn() الآمنة بدلاً من psycopg2.connect() المباشر
-    conn = get_conn()
-    cur  = conn.cursor()
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id BIGINT PRIMARY KEY, username TEXT, name TEXT,
-        lang TEXT DEFAULT 'ar', balance REAL DEFAULT 0,
-        state TEXT DEFAULT 'main', state_data TEXT DEFAULT '{}'
-    )""")
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS categories (
-        id SERIAL PRIMARY KEY,
-        parent_id INTEGER DEFAULT NULL,
-        name_ar TEXT NOT NULL, name_en TEXT NOT NULL, name_fr TEXT NOT NULL,
-        emoji TEXT DEFAULT '📦', is_active INTEGER DEFAULT 1
-    )""")
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS products (
-        id SERIAL PRIMARY KEY,
-        category_id INTEGER NOT NULL,
-        name_ar TEXT NOT NULL, name_en TEXT NOT NULL, name_fr TEXT NOT NULL,
-        desc_ar TEXT, price REAL NOT NULL, stock INTEGER DEFAULT 0,
-        image_id TEXT, content TEXT, is_active INTEGER DEFAULT 1,
-        discount INTEGER DEFAULT 0
-    )""")
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS carts (
-        user_id BIGINT, product_id INTEGER, qty INTEGER DEFAULT 1,
-        PRIMARY KEY(user_id, product_id)
-    )""")
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS orders (
-        id SERIAL PRIMARY KEY, user_id BIGINT,
-        items TEXT, total REAL, discount REAL DEFAULT 0, method TEXT,
-        status TEXT DEFAULT 'pending', receipt_id TEXT,
-        created TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )""")
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS product_stock (
-        id SERIAL PRIMARY KEY,
-        product_id INTEGER NOT NULL,
-        unit_value TEXT NOT NULL,
-        is_used INTEGER DEFAULT 0,
-        used_at TIMESTAMP DEFAULT NULL,
-        order_id INTEGER DEFAULT NULL
-    )""")
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT
-    )""")
-    # قيم افتراضية للقوانين
-    cur.execute("INSERT INTO settings (key,value) VALUES ('rules_ar','📋 قوانين المتجر\n\n• القانون الأول\n• القانون الثاني\n• القانون الثالث') ON CONFLICT (key) DO NOTHING")
-    cur.execute("INSERT INTO settings (key,value) VALUES ('rules_en','📋 Store Rules\n\n• Rule one\n• Rule two\n• Rule three') ON CONFLICT (key) DO NOTHING")
-    cur.execute("INSERT INTO settings (key,value) VALUES ('rules_fr','📋 Règles du magasin\n\n• Règle un\n• Règle deux\n• Règle trois') ON CONFLICT (key) DO NOTHING")
-    # بيانات تجريبية
-    cur.execute("SELECT COUNT(*) FROM categories")
-    if cur.fetchone()[0] == 0:
-        for pname, pem in [("9Proxy","🔵"), ("PIA Proxy","🟣"), ("922Proxy","🟡")]:
-            cur.execute("INSERT INTO categories (name_ar,name_en,name_fr,emoji) VALUES (%s,%s,%s,%s) RETURNING id",
-                        (pname, pname, pname, pem))
-            pid = cur.fetchone()[0]
-            for nar, nen, nfr, em in [("سكني","Residential","Résidentiel","🏠"),
-                                       ("داتاسنتر","Datacenter","Datacenter","🖥️"),
-                                       ("ستاتيك","Static IPs","IPs Statiques","📌")]:
-                cur.execute("INSERT INTO categories (parent_id,name_ar,name_en,name_fr,emoji) VALUES (%s,%s,%s,%s,%s) RETURNING id",
-                            (pid, nar, nen, nfr, em))
-                sid = cur.fetchone()[0]
-                for row in [(sid, f"1GB {nar}", "1GB Plan", "1GB Plan", 3.99, 0),
-                            (sid, f"5GB {nar}", "5GB Plan", "5GB Plan", 9.99, 0)]:
-                    cur.execute("INSERT INTO products (category_id,name_ar,name_en,name_fr,price,stock) VALUES (%s,%s,%s,%s,%s,%s)", row)
-    conn.commit(); conn.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id BIGINT PRIMARY KEY, username TEXT, name TEXT,
+            lang TEXT DEFAULT 'ar', balance REAL DEFAULT 0,
+            state TEXT DEFAULT 'main', state_data TEXT DEFAULT '{}'
+        )""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS categories (
+            id SERIAL PRIMARY KEY,
+            parent_id INTEGER DEFAULT NULL,
+            name_ar TEXT NOT NULL, name_en TEXT NOT NULL, name_fr TEXT NOT NULL,
+            emoji TEXT DEFAULT '📦', is_active INTEGER DEFAULT 1
+        )""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS products (
+            id SERIAL PRIMARY KEY,
+            category_id INTEGER NOT NULL,
+            name_ar TEXT NOT NULL, name_en TEXT NOT NULL, name_fr TEXT NOT NULL,
+            desc_ar TEXT, price REAL NOT NULL, stock INTEGER DEFAULT 0,
+            image_id TEXT, content TEXT, is_active INTEGER DEFAULT 1,
+            discount INTEGER DEFAULT 0
+        )""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS carts (
+            user_id BIGINT, product_id INTEGER, qty INTEGER DEFAULT 1,
+            PRIMARY KEY(user_id, product_id)
+        )""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id SERIAL PRIMARY KEY, user_id BIGINT,
+            items TEXT, total REAL, discount REAL DEFAULT 0, method TEXT,
+            status TEXT DEFAULT 'pending', receipt_id TEXT,
+            created TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS product_stock (
+            id SERIAL PRIMARY KEY,
+            product_id INTEGER NOT NULL,
+            unit_value TEXT NOT NULL,
+            is_used INTEGER DEFAULT 0,
+            used_at TIMESTAMP DEFAULT NULL,
+            order_id INTEGER DEFAULT NULL
+        )""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )""")
+        cur.execute("INSERT INTO settings (key,value) VALUES ('rules_ar','📋 قوانين المتجر\n\n• القانون الأول\n• القانون الثاني\n• القانون الثالث') ON CONFLICT (key) DO NOTHING")
+        cur.execute("INSERT INTO settings (key,value) VALUES ('rules_en','📋 Store Rules\n\n• Rule one\n• Rule two\n• Rule three') ON CONFLICT (key) DO NOTHING")
+        cur.execute("INSERT INTO settings (key,value) VALUES ('rules_fr','📋 Règles du magasin\n\n• Règle un\n• Règle deux\n• Règle trois') ON CONFLICT (key) DO NOTHING")
+        cur.execute("SELECT COUNT(*) FROM categories")
+        if cur.fetchone()[0] == 0:
+            for pname, pem in [("9Proxy","🔵"), ("PIA Proxy","🟣"), ("922Proxy","🟡")]:
+                cur.execute("INSERT INTO categories (name_ar,name_en,name_fr,emoji) VALUES (%s,%s,%s,%s) RETURNING id",
+                            (pname, pname, pname, pem))
+                pid = cur.fetchone()[0]
+                for nar, nen, nfr, em in [("سكني","Residential","Résidentiel","🏠"),
+                                           ("داتاسنتر","Datacenter","Datacenter","🖥️"),
+                                           ("ستاتيك","Static IPs","IPs Statiques","📌")]:
+                    cur.execute("INSERT INTO categories (parent_id,name_ar,name_en,name_fr,emoji) VALUES (%s,%s,%s,%s,%s) RETURNING id",
+                                (pid, nar, nen, nfr, em))
+                    sid = cur.fetchone()[0]
+                    for row in [(sid, f"1GB {nar}", "1GB Plan", "1GB Plan", 3.99, 0),
+                                (sid, f"5GB {nar}", "5GB Plan", "5GB Plan", 9.99, 0)]:
+                        cur.execute("INSERT INTO products (category_id,name_ar,name_en,name_fr,price,stock) VALUES (%s,%s,%s,%s,%s,%s)", row)
 
 # ── columns: categories = [0:id,1:parent_id,2:name_ar,3:name_en,4:name_fr,5:emoji,6:is_active]
 # ── columns: products   = [0:id,1:cat_id,2:name_ar,3:name_en,4:name_fr,5:desc,6:price,7:stock,8:image_id,9:content,10:is_active,11:discount]
 
 def upsert_user(uid, username, name):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("INSERT INTO users (id,username,name) VALUES (%s,%s,%s) ON CONFLICT (id) DO NOTHING", (uid,username,name))
-    c.commit(); c.close()
+    with get_db() as conn:
+        conn.cursor().execute(
+            "INSERT INTO users (id,username,name) VALUES (%s,%s,%s) ON CONFLICT (id) DO NOTHING",
+            (uid, username, name))
 
 def get_lang(uid):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("SELECT lang FROM users WHERE id=%s", (uid,))
-    r = cur.fetchone(); c.close()
-    return r[0] if r else "ar"
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT lang FROM users WHERE id=%s", (uid,))
+        r = cur.fetchone()
+        return r[0] if r else "ar"
 
 def set_lang(uid, lang):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("UPDATE users SET lang=%s WHERE id=%s", (lang, uid))
-    c.commit(); c.close()
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE users SET lang=%s WHERE id=%s", (lang, uid))
 
 def get_state(uid):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("SELECT state, state_data FROM users WHERE id=%s", (uid,))
-    r = cur.fetchone(); c.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT state, state_data FROM users WHERE id=%s", (uid,))
+        r = cur.fetchone()
     if r:
         try: return r[0], json.loads(r[1] or "{}")
         except: return r[0], {}
     return "main", {}
 
 def set_state(uid, state, data=None):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("UPDATE users SET state=%s, state_data=%s WHERE id=%s",
-                (state, json.dumps(data or {}, ensure_ascii=False), uid))
-    c.commit(); c.close()
+    with get_db() as conn:
+        conn.cursor().execute(
+            "UPDATE users SET state=%s, state_data=%s WHERE id=%s",
+            (state, json.dumps(data or {}, ensure_ascii=False), uid))
 
 def clear_state(uid): set_state(uid, "main", {})
 
 # ── Categories ──
 def get_categories(parent_id=None):
-    c = get_conn(); cur = c.cursor()
-    if parent_id is None:
-        cur.execute("SELECT * FROM categories WHERE parent_id IS NULL AND is_active=1 ORDER BY id")
-    else:
-        cur.execute("SELECT * FROM categories WHERE parent_id=%s AND is_active=1 ORDER BY id", (parent_id,))
-    r = _rows(cur.fetchall()); c.close(); return r
+    with get_db() as conn:
+        cur = conn.cursor()
+        if parent_id is None:
+            cur.execute("SELECT * FROM categories WHERE parent_id IS NULL AND is_active=1 ORDER BY id")
+        else:
+            cur.execute("SELECT * FROM categories WHERE parent_id=%s AND is_active=1 ORDER BY id", (parent_id,))
+        return cur.fetchall()
 
 def get_all_categories_flat():
-    c = get_conn(); cur = c.cursor()
-    cur.execute("SELECT * FROM categories WHERE is_active=1 ORDER BY id")
-    r = _rows(cur.fetchall()); c.close(); return r
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM categories WHERE is_active=1 ORDER BY id")
+        return cur.fetchall()
 
 def get_category(cid):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("SELECT * FROM categories WHERE id=%s", (cid,))
-    r = cur.fetchone(); c.close(); return _row(r)
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM categories WHERE id=%s", (cid,))
+        return cur.fetchone()
 
 def has_subcats(cid):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("SELECT COUNT(*) FROM categories WHERE parent_id=%s AND is_active=1", (cid,))
-    n = cur.fetchone()[0]; c.close(); return n > 0
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM categories WHERE parent_id=%s AND is_active=1", (cid,))
+        return cur.fetchone()[0] > 0
 
 def get_products_in(cid):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("SELECT * FROM products WHERE category_id=%s AND is_active=1", (cid,))
-    r = _rows(cur.fetchall()); c.close(); return r
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM products WHERE category_id=%s AND is_active=1", (cid,))
+        return cur.fetchall()
 
 def get_product(pid):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("SELECT * FROM products WHERE id=%s", (pid,))
-    r = cur.fetchone(); c.close(); return _row(r)
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM products WHERE id=%s", (pid,))
+        return cur.fetchone()
 
 def db_add_category(parent_id, name_ar, name_en, name_fr, emoji):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("INSERT INTO categories (parent_id,name_ar,name_en,name_fr,emoji) VALUES (%s,%s,%s,%s,%s)",
-                (parent_id, name_ar, name_en, name_fr, emoji))
-    c.commit(); c.close()
+    with get_db() as conn:
+        conn.cursor().execute(
+            "INSERT INTO categories (parent_id,name_ar,name_en,name_fr,emoji) VALUES (%s,%s,%s,%s,%s)",
+            (parent_id, name_ar, name_en, name_fr, emoji))
 
 def db_add_product(cid, nar, nen, nfr, desc, price, img):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("INSERT INTO products (category_id,name_ar,name_en,name_fr,desc_ar,price,stock,image_id) VALUES (%s,%s,%s,%s,%s,%s,0,%s)",
-                (cid, nar, nen, nfr, desc, price, img))
-    c.commit(); c.close()
+    with get_db() as conn:
+        conn.cursor().execute(
+            "INSERT INTO products (category_id,name_ar,name_en,name_fr,desc_ar,price,stock,image_id) VALUES (%s,%s,%s,%s,%s,%s,0,%s)",
+            (cid, nar, nen, nfr, desc, price, img))
 
 def db_del_cat(cid):
-    c = get_conn(); cur = c.cursor()
-    def deactivate(cat_id):
-        cur.execute("UPDATE categories SET is_active=0 WHERE id=%s", (cat_id,))
-        cur.execute("UPDATE products SET is_active=0 WHERE category_id=%s", (cat_id,))
-        cur.execute("SELECT id FROM categories WHERE parent_id=%s", (cat_id,))
-        for row in cur.fetchall(): deactivate(row[0])
-    deactivate(cid); c.commit(); c.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        def deactivate(cat_id):
+            cur.execute("UPDATE categories SET is_active=0 WHERE id=%s", (cat_id,))
+            cur.execute("UPDATE products SET is_active=0 WHERE category_id=%s", (cat_id,))
+            cur.execute("SELECT id FROM categories WHERE parent_id=%s", (cat_id,))
+            for row in cur.fetchall(): deactivate(row[0])
+        deactivate(cid)
 
 def db_del_prod(pid):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("UPDATE products SET is_active=0 WHERE id=%s", (pid,))
-    c.commit(); c.close()
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE products SET is_active=0 WHERE id=%s", (pid,))
 
 def db_edit_category(cid, field, value):
     allowed = {"name_ar","name_en","name_fr","emoji","parent_id","is_active"}
     if field not in allowed: return
-    c = get_conn(); cur = c.cursor()
-    cur.execute(f"UPDATE categories SET {field}=%s WHERE id=%s", (value, cid))
-    c.commit(); c.close()
+    with get_db() as conn:
+        conn.cursor().execute(f"UPDATE categories SET {field}=%s WHERE id=%s", (value, cid))
 
 def db_edit_product(pid, field, value):
     allowed = {"name_ar","name_en","name_fr","desc_ar","price","content","category_id","is_active","discount"}
     if field not in allowed: return
-    c = get_conn(); cur = c.cursor()
-    cur.execute(f"UPDATE products SET {field}=%s WHERE id=%s", (value, pid))
-    c.commit(); c.close()
+    with get_db() as conn:
+        conn.cursor().execute(f"UPDATE products SET {field}=%s WHERE id=%s", (value, pid))
 
 # ── Cart ──
 def get_cart(uid):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("""SELECT ca.product_id,ca.qty,p.name_ar,p.name_en,p.name_fr,p.price,p.stock,p.discount
-                   FROM carts ca JOIN products p ON ca.product_id=p.id WHERE ca.user_id=%s""", (uid,))
-    r = _rows(cur.fetchall()); c.close(); return r
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT ca.product_id,ca.qty,p.name_ar,p.name_en,p.name_fr,p.price,p.stock,p.discount
+                       FROM carts ca JOIN products p ON ca.product_id=p.id WHERE ca.user_id=%s""", (uid,))
+        return cur.fetchall()
 
 def cart_count(uid):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("SELECT COALESCE(SUM(qty),0) FROM carts WHERE user_id=%s", (uid,))
-    n = cur.fetchone()[0]; c.close(); return n
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COALESCE(SUM(qty),0) FROM carts WHERE user_id=%s", (uid,))
+        return cur.fetchone()[0]
 
 def add_to_cart(uid, pid, qty=1):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("""INSERT INTO carts (user_id,product_id,qty) VALUES (%s,%s,%s)
-                   ON CONFLICT (user_id,product_id) DO UPDATE SET qty=carts.qty+%s""",
-                (uid, pid, qty, qty))
-    c.commit(); c.close()
+    with get_db() as conn:
+        conn.cursor().execute(
+            """INSERT INTO carts (user_id,product_id,qty) VALUES (%s,%s,%s)
+               ON CONFLICT (user_id,product_id) DO UPDATE SET qty=carts.qty+%s""",
+            (uid, pid, qty, qty))
 
 def update_cart_qty(uid, pid, qty):
-    c = get_conn(); cur = c.cursor()
-    if qty <= 0:
-        cur.execute("DELETE FROM carts WHERE user_id=%s AND product_id=%s", (uid, pid))
-    else:
-        cur.execute("UPDATE carts SET qty=%s WHERE user_id=%s AND product_id=%s", (qty, uid, pid))
-    c.commit(); c.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        if qty <= 0:
+            cur.execute("DELETE FROM carts WHERE user_id=%s AND product_id=%s", (uid, pid))
+        else:
+            cur.execute("UPDATE carts SET qty=%s WHERE user_id=%s AND product_id=%s", (qty, uid, pid))
 
 def clear_cart(uid):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("DELETE FROM carts WHERE user_id=%s", (uid,))
-    c.commit(); c.close()
+    with get_db() as conn:
+        conn.cursor().execute("DELETE FROM carts WHERE user_id=%s", (uid,))
 
 # ── Balance ──
 def get_balance(uid):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("SELECT balance FROM users WHERE id=%s", (uid,))
-    r = cur.fetchone(); c.close(); return r[0] if r else 0.0
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT balance FROM users WHERE id=%s", (uid,))
+        r = cur.fetchone()
+        return r[0] if r else 0.0
 
 def change_balance(uid, amt):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("UPDATE users SET balance=balance+%s WHERE id=%s", (amt, uid))
-    c.commit(); c.close()
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE users SET balance=balance+%s WHERE id=%s", (amt, uid))
 
 # ── Orders ──
 def create_order(uid, items, total, discount, method):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("INSERT INTO orders (user_id,items,total,discount,method) VALUES (%s,%s,%s,%s,%s) RETURNING id",
-                (uid, json.dumps(items, ensure_ascii=False), total, discount, method))
-    oid = cur.fetchone()[0]; c.commit(); c.close(); return oid
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO orders (user_id,items,total,discount,method) VALUES (%s,%s,%s,%s,%s) RETURNING id",
+            (uid, json.dumps(items, ensure_ascii=False), total, discount, method))
+        return cur.fetchone()[0]
 
 def set_order_status(oid, status, receipt_id=None):
-    c = get_conn(); cur = c.cursor()
-    if receipt_id:
-        cur.execute("UPDATE orders SET status=%s,receipt_id=%s WHERE id=%s", (status, receipt_id, oid))
-    else:
-        cur.execute("UPDATE orders SET status=%s WHERE id=%s", (status, oid))
-    c.commit(); c.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        if receipt_id:
+            cur.execute("UPDATE orders SET status=%s,receipt_id=%s WHERE id=%s", (status, receipt_id, oid))
+        else:
+            cur.execute("UPDATE orders SET status=%s WHERE id=%s", (status, oid))
 
 def get_order(oid):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("SELECT * FROM orders WHERE id=%s", (oid,))
-    r = cur.fetchone(); c.close(); return _row(r)
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM orders WHERE id=%s", (oid,))
+        return cur.fetchone()
 
 def get_user_orders(uid):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("SELECT * FROM orders WHERE user_id=%s ORDER BY created DESC LIMIT 15", (uid,))
-    r = _rows(cur.fetchall()); c.close(); return r
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM orders WHERE user_id=%s ORDER BY created DESC LIMIT 15", (uid,))
+        return cur.fetchall()
 
 # ── Digital Stock ──
 def stock_add_units(pid, units):
-    c = get_conn(); cur = c.cursor()
-    for u in units:
-        if u.strip():
-            cur.execute("INSERT INTO product_stock (product_id,unit_value) VALUES (%s,%s)", (pid, u.strip()))
-    cur.execute("SELECT COUNT(*) FROM product_stock WHERE product_id=%s AND is_used=0", (pid,))
-    count = cur.fetchone()[0]
-    cur.execute("UPDATE products SET stock=%s WHERE id=%s", (count, pid))
-    c.commit(); c.close(); return count
+    with get_db() as conn:
+        cur = conn.cursor()
+        for u in units:
+            if u.strip():
+                cur.execute("INSERT INTO product_stock (product_id,unit_value) VALUES (%s,%s)", (pid, u.strip()))
+        cur.execute("SELECT COUNT(*) FROM product_stock WHERE product_id=%s AND is_used=0", (pid,))
+        count = cur.fetchone()[0]
+        cur.execute("UPDATE products SET stock=%s WHERE id=%s", (count, pid))
+        return count
 
 def stock_pop_unit(pid, order_id=None):
-    # BUG3 FIX: CTE مع FOR UPDATE SKIP LOCKED لتفادي race condition
-    # مستخدمان لا يحصلان على نفس الوحدة أبداً حتى عند الشراء المتزامن
-    c = get_conn(); cur = c.cursor()
-    cur.execute("""
-        WITH next_unit AS (
-            SELECT id FROM product_stock
-            WHERE product_id = %s AND is_used = 0
-            ORDER BY id ASC
-            LIMIT 1
-            FOR UPDATE SKIP LOCKED
-        )
-        UPDATE product_stock
-        SET is_used = 1, used_at = CURRENT_TIMESTAMP, order_id = %s
-        FROM next_unit
-        WHERE product_stock.id = next_unit.id
-        RETURNING product_stock.unit_value
-    """, (pid, order_id))
-    row = cur.fetchone()
-    if not row:
-        c.close(); return None
-    value = row[0]
-    cur.execute("SELECT COUNT(*) FROM product_stock WHERE product_id=%s AND is_used=0", (pid,))
-    remaining = cur.fetchone()[0]
-    cur.execute("UPDATE products SET stock=%s WHERE id=%s", (remaining, pid))
-    c.commit(); c.close(); return value
+    """atomic pop باستخدام CTE + FOR UPDATE SKIP LOCKED — آمن تماماً عند الشراء المتزامن"""
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            WITH next_unit AS (
+                SELECT id FROM product_stock
+                WHERE product_id = %s AND is_used = 0
+                ORDER BY id ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE product_stock
+            SET is_used = 1, used_at = CURRENT_TIMESTAMP, order_id = %s
+            FROM next_unit
+            WHERE product_stock.id = next_unit.id
+            RETURNING product_stock.unit_value
+        """, (pid, order_id))
+        row = cur.fetchone()
+        if not row:
+            return None
+        cur.execute("SELECT COUNT(*) FROM product_stock WHERE product_id=%s AND is_used=0", (pid,))
+        remaining = cur.fetchone()[0]
+        cur.execute("UPDATE products SET stock=%s WHERE id=%s", (remaining, pid))
+        return row[0]
 
 def stock_pop_units(pid, qty, order_id=None):
     return [u for _ in range(qty) if (u := stock_pop_unit(pid, order_id)) is not None]
 
 def stock_count(pid):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("SELECT COUNT(*) FROM product_stock WHERE product_id=%s AND is_used=0", (pid,))
-    n = cur.fetchone()[0]; c.close(); return n
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM product_stock WHERE product_id=%s AND is_used=0", (pid,))
+        return cur.fetchone()[0]
 
 def stock_get_all_units(pid):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("SELECT id,unit_value,is_used,used_at FROM product_stock WHERE product_id=%s ORDER BY id", (pid,))
-    r = _rows(cur.fetchall()); c.close(); return r
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id,unit_value,is_used,used_at FROM product_stock WHERE product_id=%s ORDER BY id", (pid,))
+        return cur.fetchall()
 
 def stock_clear(pid):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("DELETE FROM product_stock WHERE product_id=%s AND is_used=0", (pid,))
-    cur.execute("UPDATE products SET stock=0 WHERE id=%s", (pid,))
-    c.commit(); c.close()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM product_stock WHERE product_id=%s AND is_used=0", (pid,))
+        cur.execute("UPDATE products SET stock=0 WHERE id=%s", (pid,))
 
 def has_digital_stock(pid):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("SELECT COUNT(*) FROM product_stock WHERE product_id=%s", (pid,))
-    n = cur.fetchone()[0]; c.close(); return n > 0
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM product_stock WHERE product_id=%s", (pid,))
+        return cur.fetchone()[0] > 0
 
 def has_available_digital_stock(pid):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("SELECT COUNT(*) FROM product_stock WHERE product_id=%s AND is_used=0", (pid,))
-    n = cur.fetchone()[0]; c.close(); return n > 0
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM product_stock WHERE product_id=%s AND is_used=0", (pid,))
+        return cur.fetchone()[0] > 0
 
 # ── Stats ──
 def get_stats():
-    c = get_conn(); cur = c.cursor()
-    cur.execute("SELECT COUNT(*) FROM users");  u = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM orders"); o = cur.fetchone()[0]
-    cur.execute("SELECT COALESCE(SUM(total),0) FROM orders WHERE status='completed'"); r = cur.fetchone()[0]
-    c.close(); return u, o, r
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM users");  u = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM orders"); o = cur.fetchone()[0]
+        cur.execute("SELECT COALESCE(SUM(total),0) FROM orders WHERE status='completed'")
+        r = cur.fetchone()[0]
+        return u, o, r
 
 def get_all_user_ids():
-    c = get_conn(); cur = c.cursor()
-    cur.execute("SELECT id FROM users")
-    r = [x[0] for x in cur.fetchall()]; c.close(); return r
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM users")
+        return [x[0] for x in cur.fetchall()]
 
 def get_rules(lang):
     key = f"rules_{lang}" if lang in ("ar","en","fr") else "rules_ar"
-    c = get_conn(); cur = c.cursor()
-    cur.execute("SELECT value FROM settings WHERE key=%s", (key,))
-    r = cur.fetchone(); c.close()
-    return r[0] if r else "📋 لا توجد قوانين بعد"
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM settings WHERE key=%s", (key,))
+        r = cur.fetchone()
+        return r[0] if r else "📋 لا توجد قوانين بعد"
 
 def set_rules(lang, text):
     key = f"rules_{lang}" if lang in ("ar","en","fr") else "rules_ar"
-    c = get_conn(); cur = c.cursor()
-    cur.execute("INSERT INTO settings (key,value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value=%s", (key, text, text))
-    c.commit(); c.close()
+    with get_db() as conn:
+        conn.cursor().execute(
+            "INSERT INTO settings (key,value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value=%s",
+            (key, text, text))
 
 # ── Stock from digital or product.stock ──
 def get_real_stock(p):
-    """إرجاع الكمية الفعلية حسب نظام المخزن المستخدم"""
     if has_digital_stock(p[0]):
-        return stock_count(p[0])  # stock_count تحسب is_used=0 فقط
+        return stock_count(p[0])
     return p[7]
 
 # ============================================================
@@ -1429,15 +1475,15 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try: await q.answer()
         except Exception: pass
         oid = int(d.split(":")[1])
-        # BUG5 FIX: atomic approve — يمنع التسليم المزدوج عند ضغط approve مرتين
-        conn = get_conn(); cur = conn.cursor()
-        cur.execute("""
-            UPDATE orders SET status='completed'
-            WHERE id=%s AND status != 'completed'
-            RETURNING id
-        """, (oid,))
-        updated = cur.fetchone()
-        conn.commit(); conn.close()
+        # atomic approve — يمنع التسليم المزدوج
+        with get_db() as _conn:
+            _cur = _conn.cursor()
+            _cur.execute("""
+                UPDATE orders SET status='completed'
+                WHERE id=%s AND status != 'completed'
+                RETURNING id
+            """, (oid,))
+            updated = _cur.fetchone()
         if not updated:
             await q.answer("✅ الطلب مكتمل بالفعل أو غير موجود", show_alert=True); return
         order = get_order(oid)
@@ -1770,15 +1816,15 @@ async def _cb_payment(update, ctx, lang, method):
             await send_or_edit(update, "❌ تعذر إنشاء رابط الدفع، تواصل مع الدعم.", kb)
 
     elif method == "wallet":
-        # BUG4 FIX: atomic deduction — يمنع double-spend إذا ضغط المستخدم مرتين
-        conn = get_conn(); cur = conn.cursor()
-        cur.execute("""
-            UPDATE users SET balance = balance - %s
-            WHERE id = %s AND balance >= %s
-            RETURNING balance
-        """, (final, uid, final))
-        row = cur.fetchone()
-        conn.commit(); conn.close()
+        # atomic deduction — يمنع double-spend
+        with get_db() as _conn:
+            _cur = _conn.cursor()
+            _cur.execute("""
+                UPDATE users SET balance = balance - %s
+                WHERE id = %s AND balance >= %s
+                RETURNING balance
+            """, (final, uid, final))
+            row = _cur.fetchone()
         if not row:
             bal = get_balance(uid)
             kb = [
@@ -2067,8 +2113,7 @@ async def _cb_admin(update, ctx, lang, action):
         await send_or_edit(update, t(lang,"disc_panel"), kb)
 
     elif action == "orders":
-        # BUG8 FIX: استخدام context manager لضمان إغلاق الـ connection
-        with get_conn() as c2:
+        with get_db() as c2:
             cur2 = c2.cursor()
             cur2.execute("SELECT id,user_id,total,status,method,created FROM orders ORDER BY created DESC LIMIT 20")
             orders = cur2.fetchall()
