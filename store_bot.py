@@ -15,7 +15,7 @@ BAN_DURATION         = int(os.getenv("BAN_DURATION", "5"))
 MIN_WITHDRAW         = int(os.getenv("MIN_WITHDRAW", "500"))
 FLASK_PORT           = int(os.getenv("PORT", "5000"))
 SUPPORT_USER         = os.getenv("SUPPORT_USER", "support")
-DEFAULT_CHARGE_PHONE = os.getenv("CHARGE_PHONE", "0555 123 456") 
+DEFAULT_CHARGE_PHONE = os.getenv("CHARGE_PHONE", "0555 123 456")
 TARGET_SENDER        = os.getenv("TARGET_SENDER", "Mobilis")
 SMS_TIME_WINDOW_MIN  = int(os.getenv("SMS_TIME_WINDOW", "60"))
 
@@ -423,24 +423,21 @@ def find_sms_match(cur, amount, candidate_times):
     if row:
         return ("single", [row["id"]], row["sms_time"])
 
-    # المرحلة 2: رسالتان فقط مجموعهما = المبلغ في نفس الوقت المدخل بالضبط
-    # الوقت الدقيق هو العنصر الأوسط في candidate_times (الوقت الذي أدخله المستخدم)
-    exact_time = candidate_times[len(candidate_times) // 2]
-
-    cur.execute("""
-        SELECT id, amount FROM sms_vault
-        WHERE sms_time = %s
+    # المرحلة 2: رسالتان مجموعهما = المبلغ ضمن ±1 دقيقة
+    cur.execute(f"""
+        SELECT id, amount, sms_time FROM sms_vault
+        WHERE sms_time IN ({placeholders})
           AND status = 'unused'
           AND received_at >= NOW() - INTERVAL '24 hours'
         ORDER BY received_at ASC
         FOR UPDATE SKIP LOCKED
-    """, [exact_time])
+    """, candidate_times)
     rows = cur.fetchall()
 
     if len(rows) >= 2:
         for r1, r2 in combinations(rows, 2):
             if r1["amount"] + r2["amount"] == amount:
-                return ("split", [r1["id"], r2["id"]], exact_time)
+                return ("split", [r1["id"], r2["id"]], r1["sms_time"])
 
     return (None, [], "")
 
